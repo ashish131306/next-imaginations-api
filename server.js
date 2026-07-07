@@ -16,7 +16,7 @@ import { lookup } from 'node:dns/promises';
 import { connectDb, createEnquiry, listEnquiries, countEnquiries, setStatus, closeDb } from './db.js';
 import { recordPageview } from './db.js';
 import { ensureAccountIndexes } from './account-db.js';
-import authRouter from './auth.js';
+import authRouter, { adminAuthOk } from './auth.js';
 import { verifyMail, mailConfigured } from './mailer.js';
 
 const app = express();
@@ -104,10 +104,7 @@ const authLimiter = makeLimiter(Number(process.env.RATE_LIMIT_AUTH || 10), 'Too 
 /* ----------------------------------------------------------- Admin auth --- */
 
 function requireAdmin(req, res, next) {
-  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-  if (!process.env.ADMIN_TOKEN || token !== process.env.ADMIN_TOKEN) {
-    return res.status(401).json({ ok: false, error: 'Unauthorised.' });
-  }
+  if (!adminAuthOk(req)) return res.status(401).json({ ok: false, error: 'Unauthorised.' });
   next();
 }
 
