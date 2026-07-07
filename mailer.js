@@ -4,9 +4,12 @@
 
 import nodemailer from 'nodemailer';
 
-const configured = Boolean(process.env.SMTP_HOST);
+// Two transports: Brevo's HTTPS API (BREVO_API_KEY, works on hosts that
+// block SMTP ports — e.g. Render's free tier) or classic SMTP (SMTP_HOST).
+const BREVO_KEY = process.env.BREVO_API_KEY || '';
+const configured = Boolean(BREVO_KEY || process.env.SMTP_HOST);
 
-const transport = configured
+const transport = (configured && !BREVO_KEY)
   ? nodemailer.createTransport({
       host: process.env.SMTP_HOST,
       port: Number(process.env.SMTP_PORT || 587),
@@ -78,16 +81,47 @@ export function renderEmail({ heading, bodyHtml, cta }) {
 </body></html>`;
 }
 
+// Brevo transactional HTTP API (https, port 443 — never blocked).
+async function sendViaBrevoApi({ to, subject, text, html, attachments }) {
+  const from = process.env.MAIL_FROM || 'Next Imaginations <no-reply@nextimaginations.com>';
+  const mm = /^(.*)<([^>]+)>\s*$/.exec(from);
+  const sender = mm ? { name: mm[1].trim().replace(/^"|"$/g, ''), email: mm[2].trim() } : { email: from.trim() };
+  const payload = {
+    sender, to: [{ email: to }], subject,
+    textContent: text || undefined, htmlContent: html || undefined,
+    attachment: attachments && attachments.length
+      ? attachments.map((a) => ({ name: a.filename, content: Buffer.from(a.content).toString('base64') }))
+      : undefined,
+  };
+  const r = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: { 'api-key': BREVO_KEY, 'Content-Type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(15000),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(d.message || `Brevo HTTP ${r.status}`);
+    err.response = JSON.stringify(d).slice(0, 200);
+    throw err;
+  }
+  return { messageId: d.messageId || 'brevo' };
+}
+
 // Core sender. Accepts optional `html` and `attachments` (nodemailer format).
 export async function sendMail({ to, subject, text, html, attachments }) {
   to = oneLine(to);
   subject = oneLine(subject).slice(0, 250);
-  if (!transport) {
+  if (!configured) {
     const att = attachments && attachments.length ? `\n  [+${attachments.length} attachment(s): ${attachments.map((a) => a.filename).join(', ')}]` : '';
     console.log(`\n  [mail — dev fallback] to: ${to}\n  subject: ${subject}\n  ${String(text || '(html only)').replace(/\n/g, '\n  ')}${att}\n`);
     return { dev: true };
   }
   try {
+    if (BREVO_KEY) {
+      const info = await sendViaBrevoApi({ to, subject, text, html, attachments });
+      return { dev: false, ok: true, id: info.messageId };
+    }
     const info = await transport.sendMail({
       from: process.env.MAIL_FROM || `Next Imaginations <no-reply@nextimaginations.com>`,
       to, subject,
@@ -109,7 +143,16 @@ export async function sendMail({ to, subject, text, html, attachments }) {
 
 // One-shot SMTP verification, used at startup so misconfiguration is obvious.
 export async function verifyMail() {
-  if (!transport) return { configured: false };
+  if (!configured) return { configured: false };
+  if (BREVO_KEY) {
+    try {
+      const r = await fetch('https://api.brevo.com/v3/account', {
+        headers: { 'api-key': BREVO_KEY, accept: 'application/json' }, signal: AbortSignal.timeout(10000),
+      });
+      if (!r.ok) return { configured: true, ok: false, error: `Brevo API key rejected (HTTP ${r.status})` };
+      return { configured: true, ok: true, transport: 'brevo-api' };
+    } catch (e) { return { configured: true, ok: false, error: e.message }; }
+  }
   try { await transport.verify(); return { configured: true, ok: true }; }
   catch (e) { return { configured: true, ok: false, error: e.message, code: e.code, response: e.response }; }
 }
