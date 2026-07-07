@@ -69,9 +69,16 @@ export function adminAuthOk(req) {
 
 /* ── sessions via httpOnly cookie ─────────────────────────────── */
 const COOKIE = 'ni_session';
-const cookieOpts = () =>
-  `HttpOnly; Path=/; SameSite=Lax; Max-Age=${30 * 86400}` +
-  (IS_PROD ? '; Secure' : '');
+// In production the site (www.…) and API (api.…) are different origins on the
+// same registrable domain. SameSite=None + Secure + an explicit parent Domain
+// is the configuration every browser honours for credentialed subdomain
+// fetches (Firefox is stricter than Chrome about Lax here). CSRF is covered
+// by the Origin allowlist middleware in server.js.
+const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN || (IS_PROD ? '.nextimaginations.com' : '');
+const cookieTail = () =>
+  (IS_PROD ? '; SameSite=None; Secure' : '; SameSite=Lax') +
+  (COOKIE_DOMAIN ? `; Domain=${COOKIE_DOMAIN}` : '');
+const cookieOpts = () => `HttpOnly; Path=/; Max-Age=${30 * 86400}` + cookieTail();
 
 function readCookie(req) {
   const raw = req.headers.cookie || '';
@@ -89,7 +96,7 @@ async function startSession(res, req, userId) {
 async function endSession(res, req) {
   const t = readCookie(req);
   if (t) await adb.revokeSession(sha(t));
-  res.append('Set-Cookie', `${COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`);
+  res.append('Set-Cookie', `${COOKIE}=; HttpOnly; Path=/; Max-Age=0` + cookieTail());
 }
 export async function currentUser(req) {
   const t = readCookie(req);
@@ -196,6 +203,20 @@ router.post('/verify-email', async (req, res) => {
   sendWelcome(u).catch(() => {});
   await startSession(res, req, u.id);
   return res.json({ ok: true, user: publicUser(await adb.userById(u.id)) });
+});
+
+router.post('/verify-email/resend', async (req, res) => {
+  const email = clean(req.body?.email, 200).toLowerCase();
+  if (!isEmail(email)) return res.status(400).json({ ok: false, error: 'Please enter a valid email address.' });
+  const u = await adb.userByEmail(email);
+  let dev = {};
+  if (u && !u.email_verified_at) {
+    const sent = await issueOtp(email, 'verify');
+    if (!sent.ok) return res.status(429).json(sent);
+    if (sent.devOtp) dev = { devOtp: sent.devOtp };
+  }
+  // Same response whether or not the account exists — no address probing.
+  return res.json({ ok: true, message: 'If this email needs verification, a new code has been sent.', ...dev });
 });
 
 /* ── login: password (± MFA) ──────────────────────────────────── */
