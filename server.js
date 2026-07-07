@@ -15,6 +15,9 @@ import express from 'express';
 import { lookup } from 'node:dns/promises';
 import { connectDb, createEnquiry, listEnquiries, countEnquiries, setStatus, closeDb } from './db.js';
 import { recordPageview } from './db.js';
+import { ensureAccountIndexes } from './account-db.js';
+import authRouter from './auth.js';
+import { verifyMail, mailConfigured } from './mailer.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -23,6 +26,13 @@ const PORT = process.env.PORT || 3000;
 // which the per-IP rate limiter below depends on.
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
+
+app.use((req, res, next) => {
+  if ((req.headers['x-forwarded-proto'] || '').includes('https')) {
+    res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
+  }
+  next();
+});
 
 app.use(express.json({ limit: '64kb' }));
 
@@ -50,6 +60,7 @@ app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin && originAllowed(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -62,29 +73,33 @@ app.use((req, res, next) => {
 /* -------------------------------------------------- Per-IP rate limiter --- */
 
 const WINDOW_MS = 60_000; // 1 minute
-const MAX_HITS = 20;      // 20 requests / minute / IP
-const hits = new Map();
 
-setInterval(() => {
-  const cutoff = Date.now() - WINDOW_MS;
-  for (const [ip, arr] of hits) {
-    const fresh = arr.filter((t) => t > cutoff);
-    if (fresh.length) hits.set(ip, fresh);
-    else hits.delete(ip);
-  }
-}, WINDOW_MS).unref();
-
-function rateLimit(req, res, next) {
-  const ip = req.ip || 'unknown';
-  const now = Date.now();
-  const arr = (hits.get(ip) || []).filter((t) => t > now - WINDOW_MS);
-  arr.push(now);
-  hits.set(ip, arr);
-  if (arr.length > MAX_HITS) {
-    return res.status(429).json({ ok: false, error: 'Too many requests. Please try again shortly.' });
-  }
-  next();
+function makeLimiter(maxHits, message = 'Too many requests. Please try again shortly.') {
+  const hits = new Map();
+  setInterval(() => {
+    const cutoff = Date.now() - WINDOW_MS;
+    for (const [ip, arr] of hits) {
+      const fresh = arr.filter((t) => t > cutoff);
+      if (fresh.length) hits.set(ip, fresh);
+      else hits.delete(ip);
+    }
+  }, WINDOW_MS).unref();
+  return function limiter(req, res, next) {
+    const ip = req.ip || 'unknown';
+    const now = Date.now();
+    const arr = (hits.get(ip) || []).filter((t) => t > now - WINDOW_MS);
+    arr.push(now);
+    hits.set(ip, arr);
+    if (arr.length > maxHits) {
+      return res.status(429).json({ ok: false, error: message });
+    }
+    next();
+  };
 }
+// The account dashboard fires ~9 API calls per page-load, so the general
+// limit must comfortably allow a few loads per minute. Overridable via env.
+const rateLimit = makeLimiter(Number(process.env.RATE_LIMIT_GENERAL || 60));
+const authLimiter = makeLimiter(Number(process.env.RATE_LIMIT_AUTH || 10), 'Too many attempts. Please wait a minute.');
 
 /* ----------------------------------------------------------- Admin auth --- */
 
@@ -176,6 +191,34 @@ app.patch('/api/enquiries/:id', requireAdmin, async (req, res) => {
 });
 
 
+/* -------------------------------------------------------- Account API --- */
+
+// Public runtime config for the account UI (Razorpay key when enabled).
+app.get('/api/config', (_req, res) => res.json({ ok: true, rzpKey: process.env.RAZORPAY_KEY_ID || null }));
+
+// CSRF defence for the cookie-authenticated account routes: a mutating
+// request that carries a browser Origin must come from an allowed origin.
+// (Bearer-token admin calls and non-browser clients send no Origin.)
+app.use('/api/auth', (req, res, next) => {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !(req.headers.authorization || '').startsWith('Bearer ')) {
+    const origin = req.headers.origin;
+    if (origin && !originAllowed(origin)) {
+      return res.status(403).json({ ok: false, error: 'Cross-site request refused.' });
+    }
+  }
+  next();
+});
+
+// Tighter limiter on credential endpoints, general limiter elsewhere.
+app.use('/api/auth', (req, res, next) => {
+  if (/^\/(register|login(\/mfa)?|otp\/(request|verify)|verify-email)$/.test(req.path)) {
+    return authLimiter(req, res, next);
+  }
+  return rateLimit(req, res, next);
+});
+
+app.use('/api/auth', authRouter);
+
 /* ------------------------------------------------ Site support routes --- */
 // Ported from the full v12 server so the static site keeps working:
 // founding-spots counter, page-view beacon, and the site-check lead magnet.
@@ -252,10 +295,17 @@ app.use((_req, res) => res.status(404).json({ ok: false, error: 'Not found.' }))
 
 try {
   await connectDb();
+  await ensureAccountIndexes();
   console.log('MongoDB connected.');
 } catch (err) {
   console.error('FATAL: could not connect to MongoDB —', err.message);
   process.exit(1);
+}
+
+if (mailConfigured) {
+  verifyMail().then((r) => console.log(r.ok ? 'SMTP verified.' : `SMTP PROBLEM: ${r.error || ''} ${r.response || ''}`));
+} else {
+  console.log('SMTP not configured — mail falls back to console logging.');
 }
 
 const server = app.listen(PORT, () => {

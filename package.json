@@ -1,7 +1,7 @@
 {
   "name": "next-imaginations-api",
-  "version": "2.0.0",
-  "description": "Next Imaginations enquiry API — Render + MongoDB Atlas build (frontend lives on Vercel).",
+  "version": "3.0.0",
+  "description": "Next Imaginations API \u2014 enquiries + client accounts (Render + MongoDB Atlas build).",
   "private": true,
   "type": "module",
   "engines": {
@@ -15,6 +15,9 @@
   "dependencies": {
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "mongodb": "^6.12.0"
+    "mongodb": "^6.12.0",
+    "bcryptjs": "^2.4.3",
+    "nodemailer": "^7.0.13",
+    "pdfkit": "^0.19.1"
   }
 }

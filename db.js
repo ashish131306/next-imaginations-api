@@ -20,6 +20,9 @@ const client = new MongoClient(MONGODB_URI, {
 let enquiries; // collection handle, set by connectDb()
 let pageviews; // daily per-path counters
 
+// Live collection handles for the account layer (populated by connectDb).
+export const collections = {};
+
 /** Connect once at startup. The server refuses to boot if this fails —
  *  better to crash loudly than to silently drop leads. */
 export async function connectDb() {
@@ -27,6 +30,17 @@ export async function connectDb() {
   const db = client.db(DB_NAME);
   enquiries = db.collection('enquiries');
   pageviews = db.collection('pageviews');
+  Object.assign(collections, {
+    enquiries,
+    users: db.collection('users'),
+    otps: db.collection('otps'),
+    sessions: db.collection('sessions'),
+    orders: db.collection('orders'),
+    payments: db.collection('payments'),
+    tickets: db.collection('tickets'),
+    ticketReplies: db.collection('ticket_replies'),
+    credits: db.collection('credits'),
+  });
 
   await enquiries.createIndexes([
     { key: { created_at: -1 }, name: 'idx_created_desc' },
