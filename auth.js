@@ -222,10 +222,19 @@ router.post('/verify-email/resend', async (req, res) => {
 /* ── login: password (± MFA) ──────────────────────────────────── */
 router.post('/login', async (req, res) => {
   const email = clean(req.body?.email, 200).toLowerCase();
+  // Durable per-account lockout: 10 failed attempts in 15 minutes. Generic
+  // message, and the counter lives in MongoDB so restarts don't reset it.
+  if (await adb.authFailCount(email) >= 10) {
+    return res.status(429).json({ ok: false, error: 'Too many attempts. Please try again in a few minutes.' });
+  }
   const u = await adb.userByEmail(email);
   const hash = u ? u.password_hash : '$2a$11$invalidinvalidinvalidinvalidinvalidinvalidinvalidinva';
   const good = bcrypt.compareSync(String(req.body?.password || ''), hash);
-  if (!u || !good) return res.status(401).json({ ok: false, error: 'Incorrect email or password.' });
+  if (!u || !good) {
+    await adb.recordAuthFail(email).catch(() => {});
+    return res.status(401).json({ ok: false, error: 'Incorrect email or password.' });
+  }
+  await adb.clearAuthFails(email).catch(() => {});
   if (!u.email_verified_at) {
     const sent = await issueOtp(email, 'verify');
     return res.status(403).json({ ok: false, next: 'verify', email,

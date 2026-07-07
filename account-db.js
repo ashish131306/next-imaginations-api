@@ -37,6 +37,23 @@ export async function ensureAccountIndexes() {
   await c.tickets.createIndex({ user_id: 1 }, { name: 'idx_tickets_user' });
   await c.ticketReplies.createIndex({ ticket_id: 1 }, { name: 'idx_replies_ticket' });
   await c.credits.createIndex({ user_id: 1 }, { name: 'idx_credits_user' });
+  // Self-cleaning collections: expired OTPs vanish after a day, session rows a
+  // month after their own 30-day expiry, failed-login counters after an hour.
+  await c.otps.createIndex({ created_dt: 1 }, { expireAfterSeconds: 86400, name: 'ttl_otps' });
+  await c.sessions.createIndex({ created_dt: 1 }, { expireAfterSeconds: 35 * 86400, name: 'ttl_sessions' });
+  await c.authFails.createIndex({ ts: 1 }, { expireAfterSeconds: 3600, name: 'ttl_fails' });
+  await c.authFails.createIndex({ k: 1, ts: 1 }, { name: 'idx_fails_k' });
+}
+
+/* ── durable brute-force throttle (survives restarts) ──────────── */
+export async function recordAuthFail(key) {
+  await c.authFails.insertOne({ k: String(key).toLowerCase(), ts: new Date() });
+}
+export async function authFailCount(key, windowMs = 15 * 60 * 1000) {
+  return c.authFails.countDocuments({ k: String(key).toLowerCase(), ts: { $gt: new Date(Date.now() - windowMs) } });
+}
+export async function clearAuthFails(key) {
+  await c.authFails.deleteMany({ k: String(key).toLowerCase() });
 }
 
 /* ── users ─────────────────────────────────────────────────────── */
@@ -101,6 +118,7 @@ export async function createOtp(email, purpose, codeHash) {
   await c.otps.insertOne({
     email: String(email).toLowerCase(), purpose, code_hash: codeHash,
     expires_at: nowStr(10 * 60 * 1000), attempts: 0, consumed_at: null, created_at: nowStr(),
+    created_dt: new Date(),
   });
 }
 export async function freshOtp(email, purpose) {
@@ -126,7 +144,7 @@ export async function createSession(tokenHash, userId, ip, ua) {
   await c.sessions.insertOne({
     token_hash: tokenHash, user_id: String(userId),
     created_at: nowStr(), expires_at: nowStr(30 * 86400 * 1000),
-    ip: ip || null, user_agent: ua || null, revoked_at: null,
+    ip: ip || null, user_agent: ua || null, revoked_at: null, created_dt: new Date(),
   });
 }
 export async function sessionByHash(tokenHash) {

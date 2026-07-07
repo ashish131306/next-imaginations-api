@@ -1,7 +1,7 @@
 {
   "name": "next-imaginations-api",
   "version": "3.0.0",
-  "description": "Next Imaginations API \u2014 enquiries + client accounts (Render + MongoDB Atlas build).",
+  "description": "Next Imaginations API — enquiries + client accounts (Render + MongoDB Atlas build).",
   "private": true,
   "type": "module",
   "engines": {
@@ -13,11 +13,11 @@
     "enquiries": "node scripts/list-enquiries.js"
   },
   "dependencies": {
+    "bcryptjs": "^2.4.3",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "mongodb": "^6.12.0",
-    "bcryptjs": "^2.4.3",
-    "nodemailer": "^7.0.13",
+    "nodemailer": "^9.0.3",
     "pdfkit": "^0.19.1"
   }
 }

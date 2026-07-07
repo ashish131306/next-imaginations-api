@@ -31,6 +31,14 @@ app.use((req, res, next) => {
   if ((req.headers['x-forwarded-proto'] || '').includes('https')) {
     res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
   }
+  // A JSON/PDF API never needs to run scripts, be framed, or be embedded
+  // cross-origin — say so explicitly on every response.
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-site');
   next();
 });
 
@@ -112,13 +120,27 @@ function requireAdmin(req, res, next) {
 
 app.get('/api/health', async (_req, res) => {
   try {
-    res.json({ ok: true, service: 'next-imaginations-api', db: 'mongodb', enquiries: await countEnquiries() });
+    await countEnquiries(); // round-trips the database
+    res.json({ ok: true, service: 'next-imaginations-api', db: 'ok' });
   } catch {
     res.status(503).json({ ok: false, error: 'Database unreachable.' });
   }
 });
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Deep-copy a client-supplied object, dropping any key that starts with '$'
+// or contains '.', so nothing operator-shaped is ever stored.
+function sanitizeObj(v, depth = 0) {
+  if (depth > 4 || v === null || typeof v !== 'object') return v;
+  if (Array.isArray(v)) return v.slice(0, 24).map((x) => sanitizeObj(x, depth + 1));
+  const out = {};
+  for (const [k, val] of Object.entries(v)) {
+    if (k.startsWith('$') || k.includes('.')) continue;
+    out[k.slice(0, 64)] = sanitizeObj(val, depth + 1);
+  }
+  return out;
+}
 
 app.post('/api/enquiries', rateLimit, async (req, res) => {
   const b = req.body || {};
@@ -147,8 +169,8 @@ app.post('/api/enquiries', rateLimit, async (req, res) => {
       interest: b.interest ? String(b.interest).trim().slice(0, 200) : null,
       message,
       source: b.source ? String(b.source).trim().slice(0, 40) : 'contact',
-      services: b.services,
-      estimate: b.estimate,
+      services: Array.isArray(b.services) ? sanitizeObj(b.services) : null,
+      estimate: b.estimate && typeof b.estimate === 'object' ? sanitizeObj(b.estimate) : null,
       ip: req.ip || null,
       user_agent: String(req.headers['user-agent'] || '').slice(0, 300) || null,
     });
@@ -255,7 +277,25 @@ app.post('/api/tools/site-check', rateLimit, async (req, res) => {
   const t0 = Date.now();
   let resp, html = '';
   try {
-    resp = await fetch(u.href, { redirect: 'follow', signal: AbortSignal.timeout(9000), headers: { 'User-Agent': 'NI-SiteCheck/1.0 (+https://nextimaginations.com)' } });
+    // Follow up to 3 redirects MANUALLY, re-validating each hop's hostname
+    // against the private-range list, so a public URL can't bounce the
+    // scanner into internal networks.
+    let hop = u, redirects = 0;
+    for (;;) {
+      resp = await fetch(hop.href, { redirect: 'manual', signal: AbortSignal.timeout(9000), headers: { 'User-Agent': 'NI-SiteCheck/1.0 (+https://nextimaginations.com)' } });
+      if (![301, 302, 303, 307, 308].includes(resp.status)) break;
+      if (++redirects > 3) return res.status(400).json({ ok: false, error: 'That site redirects too many times.' });
+      const loc = resp.headers.get('location');
+      if (!loc) break;
+      hop = new URL(loc, hop);
+      if (!['http:', 'https:'].includes(hop.protocol) || (hop.port && !['80', '443'].includes(hop.port))) {
+        return res.status(400).json({ ok: false, error: 'That site redirects somewhere we cannot scan.' });
+      }
+      const hopAddr = await lookup(hop.hostname).catch(() => null);
+      if (!hopAddr || PRIVATE.some((re) => re.test(hopAddr.address))) {
+        return res.status(400).json({ ok: false, error: 'That site redirects somewhere we cannot scan.' });
+      }
+    }
     html = (await resp.text()).slice(0, 400_000);
   } catch { return res.status(400).json({ ok: false, error: 'We could not reach that site (it may be down or blocking scanners).' }); }
   const ms = Date.now() - t0;
@@ -288,6 +328,19 @@ app.post('/api/tools/site-check', rateLimit, async (req, res) => {
 
 app.use((_req, res) => res.status(404).json({ ok: false, error: 'Not found.' }));
 
+// Last-resort error handler: log with an id, never leak internals.
+app.use((err, req, res, _next) => {
+  const id = Math.random().toString(36).slice(2, 10);
+  console.error(`[err ${id}] ${req.method} ${req.path} — ${err.status || 500} ${err.message}`);
+  if (res.headersSent) return;
+  const status = err.type === 'entity.too.large' ? 413 : (err.status && err.status < 500 ? err.status : 500);
+  const msg = status === 413 ? 'Request too large.' : status < 500 ? 'Bad request.' : `Something went wrong on our side (ref ${id}).`;
+  res.status(status).json({ ok: false, error: msg });
+});
+
+process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e?.message || e));
+process.on('uncaughtException', (e) => { console.error('[uncaughtException]', e?.stack || e); });
+
 /* ------------------------------------------------------------------ Boot --- */
 
 try {
@@ -309,6 +362,12 @@ const server = app.listen(PORT, () => {
   console.log(`Next Imaginations API listening on :${PORT}`);
   console.log(`Allowed origins: ${ALLOWED_ORIGINS.join(', ')} (+ *.vercel.app previews)`);
 });
+
+// Keep-alive must outlive the platform load-balancer's idle window to avoid
+// sporadic 502s; cap slow requests instead of leaving sockets open for ages.
+server.keepAliveTimeout = 120_000;
+server.headersTimeout = 125_000;
+server.requestTimeout = 30_000;
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {

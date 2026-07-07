@@ -40,6 +40,7 @@ export async function connectDb() {
     tickets: db.collection('tickets'),
     ticketReplies: db.collection('ticket_replies'),
     credits: db.collection('credits'),
+    authFails: db.collection('auth_fails'),
   });
 
   await enquiries.createIndexes([
