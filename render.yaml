@@ -1,0 +1,33 @@
+# render.yaml — Render Blueprint for the Next Imaginations enquiry API.
+#
+# In Render: New → Blueprint → point it at this repo.
+#
+# Data lives in MongoDB Atlas, so this service is STATELESS — no persistent
+# disk is required, and the free tier is now viable. Note free instances
+# sleep after ~15 min idle, so the first request after a quiet period takes
+# ~50s while it wakes; upgrade to Starter later if that bothers you.
+#
+# MONGODB_URI and DB_NAME are marked sync:false — Render will prompt you to
+# paste them during Blueprint setup. Get the URI from MongoDB Atlas
+# (Database → Connect → Drivers).
+
+services:
+  - type: web
+    name: next-imaginations-api
+    runtime: node
+    plan: free
+    region: singapore          # closest Render region to India
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: MONGODB_URI
+        sync: false            # paste your Atlas SRV URI when prompted
+      - key: DB_NAME
+        value: next-imaginations
+      - key: ADMIN_TOKEN
+        generateValue: true    # Render creates a strong secret; copy it from the dashboard
+      - key: SPOTS_LEFT
+        value: "25"
+      - key: ALLOWED_ORIGINS
+        value: https://nextimaginations.com,https://www.nextimaginations.com
