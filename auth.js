@@ -631,13 +631,13 @@ function buildInvoicePDF(p, user, o) {
     doc.fillColor(ink).fontSize(11).font('Helvetica')
       .text(o ? `${o.title}${o.service ? ' — ' + o.service : ''}` : 'Professional services', 56, y, { width: 260 })
       .text((p.method || '—').toUpperCase(), 330, y)
-      .font('Helvetica-Bold').text(`₹ ${Number(p.amount_inr).toLocaleString('en-IN')}`, 400, y, { align: 'right', width: 139 });
+      .font('Helvetica-Bold').text(`Rs. ${Number(p.amount_inr).toLocaleString('en-IN')}`, 400, y, { align: 'right', width: 139 });
     y += 40;
     if (p.reference) { doc.font('Helvetica').fontSize(9).fillColor('#666').text(`Reference: ${p.reference}`, 56, y); y += 16; }
     doc.moveTo(56, y).lineTo(539, y).strokeColor('#DDD').lineWidth(0.5).stroke();
     y += 12;
     doc.fillColor('#666').fontSize(9).text(`Status: ${p.status.toUpperCase()}`, 56, y);
-    doc.fillColor(ink).font('Helvetica-Bold').fontSize(13).text(`Total  ₹ ${Number(p.amount_inr).toLocaleString('en-IN')}`, 340, y, { align: 'right', width: 199 });
+    doc.fillColor(ink).font('Helvetica-Bold').fontSize(13).text(`Total  Rs. ${Number(p.amount_inr).toLocaleString('en-IN')}`, 340, y, { align: 'right', width: 199 });
     y += 44;
     doc.font('Helvetica').fontSize(8).fillColor('#999')
       .text('Amounts are exclusive of GST unless stated. This document is generated from your Next Imaginations client account.', 56, y, { width: 483 })
