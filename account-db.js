@@ -90,6 +90,15 @@ export async function setPassword(hash, id) {
 export async function setMfa(on, id) {
   await c.users.updateOne({ _id: oid(id) }, { $set: { mfa_enabled: on ? 1 : 0, updated_at: nowStr() } });
 }
+export async function setTotpSecret(id, secret) {
+  await c.users.updateOne({ _id: oid(id) }, { $set: { totp_secret: secret, totp_enabled: 0, updated_at: nowStr() } });
+}
+export async function enableTotp(id) {
+  await c.users.updateOne({ _id: oid(id) }, { $set: { totp_enabled: 1, updated_at: nowStr() } });
+}
+export async function disableTotp(id) {
+  await c.users.updateOne({ _id: oid(id) }, { $set: { totp_secret: null, totp_enabled: 0, updated_at: nowStr() } });
+}
 export async function setReferredBy(id, code) {
   await c.users.updateOne({ _id: oid(id) }, { $set: { referred_by: code } });
 }

@@ -13,6 +13,7 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import PDFDocument from 'pdfkit';
+import QRCode from 'qrcode';
 import { createHash, randomBytes, randomInt, timingSafeEqual, createHmac } from 'node:crypto';
 import { sendMail, sendBranded, otpMail, mailConfigured } from './mailer.js';
 import * as adb from './account-db.js';
@@ -136,9 +137,70 @@ async function checkOtp(email, purpose, code) {
 }
 const publicUser = (u) => ({
   id: u.id, name: u.name, email: u.email, phone: u.phone || '', company: u.company || '',
-  emailVerified: Boolean(u.email_verified_at), mfaEnabled: Boolean(u.mfa_enabled),
+  emailVerified: Boolean(u.email_verified_at), mfaEnabled: Boolean(u.mfa_enabled), totpEnabled: Boolean(u.totp_enabled),
   marketingOptin: Boolean(u.marketing_optin),
   consentVersion: u.consent_version, consentAt: u.consent_at, createdAt: u.created_at,
+});
+
+/* ── TOTP two-factor (authenticator app) — RFC 6238, dependency-free ──
+   Free 2FA: the user scans a QR into Google Authenticator / Authy, which then
+   generates 6-digit codes we verify with HMAC-SHA1 over a 30-second counter.
+   No SMS, no email, no third party, no per-code cost. */
+const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+function base32Encode(buf) {
+  let bits = 0, val = 0, out = '';
+  for (const b of buf) { val = (val << 8) | b; bits += 8; while (bits >= 5) { out += B32[(val >>> (bits - 5)) & 31]; bits -= 5; } }
+  if (bits > 0) out += B32[(val << (5 - bits)) & 31];
+  return out;
+}
+function base32Decode(s) {
+  let bits = 0, val = 0; const out = [];
+  for (const ch of String(s).replace(/=+$/,'').toUpperCase()) { const i = B32.indexOf(ch); if (i < 0) continue; val = (val << 5) | i; bits += 5; if (bits >= 8) { out.push((val >>> (bits - 8)) & 0xff); bits -= 8; } }
+  return Buffer.from(out);
+}
+function totpAt(secret, counter) {
+  const key = base32Decode(secret); const buf = Buffer.alloc(8);
+  buf.writeUInt32BE(Math.floor(counter / 2 ** 32), 0); buf.writeUInt32BE(counter >>> 0, 4);
+  const h = createHmac('sha1', key).update(buf).digest(); const off = h[h.length - 1] & 0xf;
+  const bin = ((h[off] & 0x7f) << 24) | ((h[off + 1] & 0xff) << 16) | ((h[off + 2] & 0xff) << 8) | (h[off + 3] & 0xff);
+  return String(bin % 1_000_000).padStart(6, '0');
+}
+function verifyTotp(secret, code) {
+  const c = String(code || '').replace(/\D/g, ''); if (c.length !== 6 || !secret) return false;
+  const step = Math.floor(Date.now() / 1000 / 30);
+  for (let w = -1; w <= 1; w++) if (safeEq(totpAt(secret, step + w), c)) return true; // ±30s tolerance
+  return false;
+}
+
+router.post('/me/totp/setup', requireAuth, async (req, res) => {
+  const secret = base32Encode(randomBytes(20));
+  await adb.setTotpSecret(req.user.id, secret);
+  const label = encodeURIComponent('Next Imaginations (' + req.user.email + ')');
+  const uri = `otpauth://totp/${label}?secret=${secret}&issuer=${encodeURIComponent('Next Imaginations')}&digits=6&period=30&algorithm=SHA1`;
+  let qr = null; try { qr = await QRCode.toDataURL(uri, { margin: 1, width: 224, color: { dark: '#2A0A12', light: '#F4EDE3' } }); } catch (_) {}
+  res.json({ ok: true, secret, otpauth: uri, qr });
+});
+router.post('/me/totp/enable', requireAuth, async (req, res) => {
+  const u = await adb.userById(req.user.id);
+  if (!u.totp_secret) return res.status(400).json({ ok: false, error: 'Start the authenticator setup first.' });
+  if (!verifyTotp(u.totp_secret, req.body?.code)) return res.status(400).json({ ok: false, error: 'That code isn’t right — check your authenticator app and try again.' });
+  await adb.enableTotp(req.user.id);
+  res.json({ ok: true, user: publicUser(await adb.userById(req.user.id)) });
+});
+router.post('/me/totp/disable', requireAuth, async (req, res) => {
+  if (!bcrypt.compareSync(String(req.body?.password || ''), req.user.password_hash)) {
+    return res.status(401).json({ ok: false, error: 'Enter your password to turn off the authenticator.' });
+  }
+  await adb.disableTotp(req.user.id);
+  res.json({ ok: true, user: publicUser(await adb.userById(req.user.id)) });
+});
+router.post('/login/totp', async (req, res) => {
+  const email = clean(req.body?.email, 200).toLowerCase();
+  const u = await adb.userByEmail(email);
+  if (!u || !u.totp_enabled || !u.totp_secret) return res.status(400).json({ ok: false, error: 'Authenticator two-step is not set up for this account.' });
+  if (!verifyTotp(u.totp_secret, req.body?.code)) return res.status(400).json({ ok: false, error: 'Incorrect code.' });
+  await startSession(res, req, u.id);
+  res.json({ ok: true, user: publicUser(u) });
 });
 
 const notify = (to, subject, text) => sendMail({ to, subject, text }).catch(() => {});
@@ -240,6 +302,9 @@ router.post('/login', async (req, res) => {
     return res.status(403).json({ ok: false, next: 'verify', email,
       error: 'Please verify your email address first. We\'ve sent you a new code.',
       ...(sent.devOtp ? { devOtp: sent.devOtp } : {}) });
+  }
+  if (u.totp_enabled) {
+    return res.json({ ok: true, next: 'totp' }); // verify via authenticator app
   }
   if (u.mfa_enabled) {
     const sent = await issueOtp(email, 'mfa');
