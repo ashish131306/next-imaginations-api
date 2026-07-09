@@ -662,6 +662,7 @@ router.post('/me/payments/:id/rzp-order', requireAuth, async (req, res) => {
   if (!RZP_ID || !RZP_SECRET) return res.status(400).json({ ok: false, error: 'Online payments are not enabled yet.' });
   const p = await adb.paymentById(req.params.id, req.user.id, req.user.email);
   if (!p || p.status !== 'pending') return res.status(400).json({ ok: false, error: 'No pending payment found.' });
+  if (!(Number(p.amount_inr) * 100 >= 100)) return res.status(400).json({ ok: false, error: 'Amount must be at least ₹1.' });
   const r = await fetch('https://api.razorpay.com/v1/orders', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Basic ' + Buffer.from(`${RZP_ID}:${RZP_SECRET}`).toString('base64') },
