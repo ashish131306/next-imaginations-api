@@ -17,7 +17,7 @@ import { connectDb, createEnquiry, listEnquiries, countEnquiries, setStatus, clo
 import { recordPageview } from './db.js';
 import { ensureAccountIndexes } from './account-db.js';
 import authRouter, { adminAuthOk } from './auth.js';
-import { verifyMail, mailConfigured } from './mailer.js';
+import { verifyMail, mailConfigured, sendMail, sendBranded } from './mailer.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -43,6 +43,83 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json({ limit: '64kb' }));
+
+/* ------------------------------------------------ Email automation ----- */
+// Where new-lead alerts go, and a nicely formatted brand contact block.
+const OWNER_EMAIL = process.env.NOTIFY_EMAIL || process.env.SMTP_USER || 'nextimaginations@gmail.com';
+const SITE_URL = process.env.PUBLIC_URL || 'https://www.nextimaginations.com';
+const inr = (n) => '₹' + Number(n || 0).toLocaleString('en-IN');
+
+// Fire-and-forget: e-mail must never delay or break the API response.
+function notifyNewEnquiry(lead) {
+  const first = String(lead.name || 'there').split(' ')[0];
+  const src = lead.source || 'contact';
+
+  // (a) Owner alert — full lead detail, one-tap reply.
+  const detail = [
+    `New ${src} enquiry from ${lead.name} <${lead.email}>.`,
+    lead.company ? `Company: ${lead.company}` : null,
+    lead.interest ? `Interest: ${lead.interest}` : null,
+    Array.isArray(lead.services) && lead.services.length ? `Services: ${lead.services.join(', ')}` : null,
+    lead.estimate && (lead.estimate.once || lead.estimate.monthly)
+      ? `Estimate: ${lead.estimate.once ? inr(lead.estimate.once) + ' one-time' : ''}${lead.estimate.monthly ? ' + ' + inr(lead.estimate.monthly) + '/mo' : ''}` : null,
+    '',
+    'Message:',
+    lead.message || '(none)',
+  ].filter((x) => x !== null);
+  sendBranded({
+    to: OWNER_EMAIL,
+    subject: `New ${src} enquiry — ${lead.name}`,
+    heading: `New enquiry from ${lead.name}`,
+    lines: detail,
+    cta: { label: `Reply to ${first}`, url: `mailto:${lead.email}?subject=Re:%20your%20enquiry%20to%20Next%20Imaginations` },
+  }).catch((e) => console.error('[mail] owner notify failed:', e.message));
+
+  // (b) Auto-acknowledgment to the person who wrote in.
+  const ackLines = [
+    `Thanks for reaching out to Next Imaginations. This is a quick automatic note to confirm your message arrived safely — nothing more is needed from you right now.`,
+    `A principal reads every enquiry personally and will reply within one business day. If it's urgent, call or WhatsApp us on +91 89300 06242.`,
+  ];
+  if (src === 'bundle') ackLines.push('We\'ll come back with a clear, fixed quote for the services you selected — no open meters, no surprises.');
+  sendBranded({
+    to: lead.email,
+    subject: 'We received your message — Next Imaginations',
+    heading: `Thanks, ${first} — we\'ve got it`,
+    lines: ackLines,
+    cta: { label: 'Explore our work', url: `${SITE_URL}/work` },
+  }).catch((e) => console.error('[mail] ack failed:', e.message));
+}
+
+// Site-check tool: e-mail the actual scan report to the visitor + alert owner.
+function notifySiteCheck({ email, url, score, ms, checks }) {
+  const passed = checks.filter((c) => c.ok).length;
+  const failing = checks.filter((c) => !c.ok);
+  const first = (email.split('@')[0] || 'there');
+  const reportLines = [
+    `Here's your free website health check for ${url}.`,
+    `Overall score: ${score}/100  (${passed} of ${checks.length} checks passed, first response ${ms} ms).`,
+  ];
+  if (failing.length) {
+    reportLines.push('', 'Top things worth fixing:');
+    failing.slice(0, 6).forEach((c) => reportLines.push(`• ${c.k} — ${c.tip}`));
+  } else {
+    reportLines.push('', 'Every check passed — your site is in great shape.');
+  }
+  reportLines.push('', 'Want us to fix these for you? Reply to this email or call +91 89300 06242. Your first project comes at founding-client rates.');
+  sendBranded({
+    to: email,
+    subject: `Your website health check — ${score}/100`,
+    heading: `Your site scored ${score}/100`,
+    lines: reportLines,
+    cta: { label: 'Talk to us about fixing these', url: `${SITE_URL}/contact` },
+  }).catch((e) => console.error('[mail] site-check report failed:', e.message));
+
+  sendMail({
+    to: OWNER_EMAIL,
+    subject: `Tool lead — ${email} scanned a site (${score}/100)`,
+    text: `${email} ran the free site check on ${url} and scored ${score}/100. Follow up within a business day.`,
+  }).catch((e) => console.error('[mail] site-check owner notify failed:', e.message));
+}
 
 /* ---------------------------------------------------------------- CORS --- */
 
@@ -175,8 +252,13 @@ app.post('/api/enquiries', rateLimit, async (req, res) => {
       user_agent: String(req.headers['user-agent'] || '').slice(0, 300) || null,
     });
 
-    // Notification hook placeholder — wire up email/WhatsApp alerts here later.
-    // notifyNewEnquiry(id);
+    // Owner alert + auto-acknowledgment (async; never blocks the response).
+    notifyNewEnquiry({ id, name, email,
+      company: b.company ? String(b.company).trim().slice(0, 200) : null,
+      interest: b.interest ? String(b.interest).trim().slice(0, 200) : null,
+      message, source: b.source ? String(b.source).trim().slice(0, 40) : 'contact',
+      services: Array.isArray(b.services) ? sanitizeObj(b.services) : null,
+      estimate: b.estimate && typeof b.estimate === 'object' ? sanitizeObj(b.estimate) : null });
 
     res.status(201).json({ ok: true, id });
   } catch (err) {
@@ -323,7 +405,9 @@ app.post('/api/tools/site-check', rateLimit, async (req, res) => {
   try {
     await createEnquiry({ name: 'Site-check lead', email, company: null, interest: 'Website health check', message: `Scanned ${u.href} \u2014 score ${score}/100 (${ms} ms).`, source: 'tool', ip: req.ip, user_agent: String(req.headers['user-agent'] || '').slice(0, 300) });
   } catch { /* the scan result still goes back to the visitor */ }
-  res.json({ ok: true, score, ms, url: resp.url, checks: checks.map(({ k, ok, tip }) => ({ k, ok, tip })) });
+  const publicChecks = checks.map(({ k, ok, tip }) => ({ k, ok, tip }));
+  notifySiteCheck({ email, url: resp.url, score, ms, checks: publicChecks });
+  res.json({ ok: true, score, ms, url: resp.url, checks: publicChecks });
 });
 
 app.use((_req, res) => res.status(404).json({ ok: false, error: 'Not found.' }));
