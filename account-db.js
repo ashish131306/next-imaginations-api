@@ -326,3 +326,24 @@ export async function adminStats() {
   const subs = await c.subscribers.countDocuments();
   return { leads, newLeads, clients, orders, openTickets: tickets, revenue: paid[0]?.sum || 0, subscribers: subs };
 }
+
+/* ── public payments: intents + coupon-aware settlement ────────── */
+export async function createPendingPayment(p) {
+  const { insertedId } = await c.payments.insertOne({
+    user_id: null, order_id: null,
+    email: p.email || null, payer_name: p.name || null,
+    amount_inr: p.amount_inr, base_inr: p.base_inr ?? p.amount_inr,
+    coupon: p.coupon || null, discount_inr: p.discount || 0,
+    method: 'gateway', reference: null, status: 'pending',
+    kind: p.kind || 'payment', rzp_order_id: p.rzp_order_id, note: p.note || null,
+    paid_at: null, created_at: nowStr(),
+  });
+  return String(insertedId);
+}
+export async function markPaymentPaidByRzpOrder(rzpOrderId, reference) {
+  const doc = await c.payments.findOne({ rzp_order_id: rzpOrderId });
+  if (!doc) return { found: false };
+  if (doc.status === 'received') return { found: true, alreadyPaid: true, payment: pub(doc) };
+  await c.payments.updateOne({ _id: doc._id }, { $set: { status: 'received', reference, paid_at: nowStr() } });
+  return { found: true, alreadyPaid: false, payment: pub({ ...doc, status: 'received', reference, paid_at: nowStr() }) };
+}
