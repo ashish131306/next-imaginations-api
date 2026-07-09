@@ -50,6 +50,31 @@ const OWNER_EMAIL = process.env.NOTIFY_EMAIL || process.env.SMTP_USER || 'nextim
 const SITE_URL = process.env.PUBLIC_URL || 'https://www.nextimaginations.com';
 const inr = (n) => '₹' + Number(n || 0).toLocaleString('en-IN');
 
+// Optional WhatsApp owner alerts via the official Cloud API. Dormant until
+// WHATSAPP_TOKEN, WHATSAPP_PHONE_ID and OWNER_WHATSAPP are set — email is the
+// default, always-on channel. (Business-initiated messages need an approved
+// template; set WHATSAPP_TEMPLATE to use one, otherwise a plain text is sent,
+// which delivers if you've messaged the number in the last 24h.)
+const WA = {
+  token: process.env.WHATSAPP_TOKEN,
+  phoneId: process.env.WHATSAPP_PHONE_ID,
+  to: (process.env.OWNER_WHATSAPP || '').replace(/[^0-9]/g, ''),
+  template: process.env.WHATSAPP_TEMPLATE || '',
+};
+function notifyWhatsApp(text) {
+  if (!WA.token || !WA.phoneId || !WA.to) return; // not configured — skip silently
+  const body = WA.template
+    ? { messaging_product: 'whatsapp', to: WA.to, type: 'template',
+        template: { name: WA.template, language: { code: 'en' }, components: [{ type: 'body', parameters: [{ type: 'text', text: text.slice(0, 900) }] }] } }
+    : { messaging_product: 'whatsapp', to: WA.to, type: 'text', text: { body: text.slice(0, 4000) } };
+  fetch(`https://graph.facebook.com/v21.0/${WA.phoneId}/messages`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${WA.token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(async (r) => { if (!r.ok) console.error('[whatsapp] send failed:', (await r.text()).slice(0, 200)); })
+    .catch((e) => console.error('[whatsapp] error:', e.message));
+}
+
 // Fire-and-forget: e-mail must never delay or break the API response.
 function notifyNewEnquiry(lead) {
   const first = String(lead.name || 'there').split(' ')[0];
@@ -74,6 +99,9 @@ function notifyNewEnquiry(lead) {
     lines: detail,
     cta: { label: `Reply to ${first}`, url: `mailto:${lead.email}?subject=Re:%20your%20enquiry%20to%20Next%20Imaginations` },
   }).catch((e) => console.error('[mail] owner notify failed:', e.message));
+
+  // Optional WhatsApp ping to the owner (dormant unless configured).
+  notifyWhatsApp(`New ${src} enquiry from ${lead.name} (${lead.email}). ${lead.message ? '“' + String(lead.message).slice(0, 140) + '”' : ''}`);
 
   // (b) Auto-acknowledgment to the person who wrote in.
   const ackLines = [
