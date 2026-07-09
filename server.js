@@ -15,7 +15,8 @@ import express from 'express';
 import { lookup } from 'node:dns/promises';
 import { connectDb, createEnquiry, listEnquiries, countEnquiries, setStatus, closeDb } from './db.js';
 import { recordPageview, addSubscriber } from './db.js';
-import { ensureAccountIndexes } from './account-db.js';
+import { createHmac, timingSafeEqual } from 'node:crypto';
+import { ensureAccountIndexes, createPayment } from './account-db.js';
 import authRouter, { adminAuthOk } from './auth.js';
 import { verifyMail, mailConfigured, sendMail, sendBranded } from './mailer.js';
 
@@ -384,6 +385,66 @@ app.post('/api/newsletter', rateLimit, async (req, res) => {
     console.error('newsletter subscribe failed:', err.message);
     res.status(500).json({ ok: false, error: 'Could not subscribe right now. Please try again shortly.' });
   }
+});
+
+/* ------------------------------------------- Paid consultation (₹500) --- */
+// A fixed-fee public payment — anyone can book a paid consultation without an
+// account. The amount is set server-side (never from the client) so it can't
+// be tampered with. Records a lead + a payment and emails both sides.
+const CONSULT_FEE = Number(process.env.CONSULTATION_FEE_INR || 500);
+const RZP_ID = process.env.RAZORPAY_KEY_ID, RZP_SECRET = process.env.RAZORPAY_KEY_SECRET;
+
+app.get('/api/consultation/config', (_req, res) =>
+  res.json({ ok: true, enabled: Boolean(RZP_ID && RZP_SECRET), fee: CONSULT_FEE, keyId: RZP_ID || null }));
+
+app.post('/api/consultation/order', rateLimit, async (_req, res) => {
+  if (!RZP_ID || !RZP_SECRET) return res.status(400).json({ ok: false, error: 'Online payments are not enabled yet.' });
+  try {
+    const r = await fetch('https://api.razorpay.com/v1/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Basic ' + Buffer.from(`${RZP_ID}:${RZP_SECRET}`).toString('base64') },
+      body: JSON.stringify({ amount: CONSULT_FEE * 100, currency: 'INR', receipt: 'NI-CONSULT-' + Date.now() }),
+    });
+    const data = await r.json();
+    if (!r.ok) { console.error('rzp consult order failed:', JSON.stringify(data).slice(0, 200)); return res.status(502).json({ ok: false, error: 'Payment gateway error.' }); }
+    res.json({ ok: true, orderId: data.id, keyId: RZP_ID, amount: CONSULT_FEE * 100 });
+  } catch (e) { console.error('consult order error:', e.message); res.status(500).json({ ok: false, error: 'Could not start payment.' }); }
+});
+
+app.post('/api/consultation/verify', rateLimit, async (req, res) => {
+  if (!RZP_SECRET) return res.status(400).json({ ok: false, error: 'Not enabled.' });
+  const b = req.body || {};
+  const { order_id, payment_id, signature } = b;
+  if (!order_id || !payment_id || !signature) return res.status(400).json({ ok: false, error: 'Missing payment fields.' });
+  const expect = createHmac('sha256', RZP_SECRET).update(order_id + '|' + payment_id).digest('hex');
+  const x = Buffer.from(expect), y = Buffer.from(String(signature));
+  if (x.length !== y.length || !timingSafeEqual(x, y)) return res.status(400).json({ ok: false, error: 'Signature mismatch.' });
+
+  const name = String(b.name || '').trim().slice(0, 120) || 'Consultation client';
+  const email = String(b.email || '').trim().slice(0, 200);
+  const note = String(b.note || '').trim().slice(0, 1000);
+  try {
+    await createEnquiry({
+      name, email: email || null,
+      interest: 'Paid consultation', source: 'consultation',
+      message: `Booked and paid a ₹${CONSULT_FEE} consultation (Razorpay ${payment_id}).${note ? ' Note: ' + note : ''}`,
+      ip: req.ip, user_agent: String(req.headers['user-agent'] || '').slice(0, 300),
+    });
+    await createPayment({ user_id: null, order_id: null, email: email || null, amount_inr: CONSULT_FEE, method: 'gateway', reference: 'RZP:' + payment_id, status: 'received', paid_at: new Date().toISOString().slice(0, 19).replace('T', ' ') });
+    // payer confirmation
+    if (email) sendBranded({
+      to: email, subject: 'Your consultation is booked — Next Imaginations',
+      heading: `Thanks ${name.split(' ')[0]}, your consultation is booked`,
+      lines: [
+        `We've received your ₹${CONSULT_FEE} consultation payment — thank you. A senior consultant will email you within one business day to schedule a 45-minute call at a time that suits you.`,
+        'Come with your goals, current setup and any questions. You\'ll leave with a clear, written plan you can act on — with or without us. And if you go ahead with a project, this ₹' + CONSULT_FEE + ' is fully adjusted against your first invoice.',
+      ],
+      cta: { label: 'Meanwhile, see our work', url: `${SITE_URL}/work` },
+    }).catch((e) => console.error('[mail] consult ack failed:', e.message));
+    // owner alert
+    sendMail({ to: OWNER_EMAIL, subject: `PAID consultation booked — ${name} (₹${CONSULT_FEE})`, text: `${name} <${email}> paid ₹${CONSULT_FEE} for a consultation (Razorpay ${payment_id}).${note ? '\nNote: ' + note : ''}\nFollow up within a business day to schedule.` }).catch(() => {});
+  } catch (e) { console.error('consult record failed:', e.message); }
+  res.json({ ok: true });
 });
 
 app.post('/api/pv', async (req, res) => {
