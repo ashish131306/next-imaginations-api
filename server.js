@@ -14,7 +14,7 @@ import 'dotenv/config';
 import express from 'express';
 import { lookup } from 'node:dns/promises';
 import { connectDb, createEnquiry, listEnquiries, countEnquiries, setStatus, closeDb } from './db.js';
-import { recordPageview } from './db.js';
+import { recordPageview, addSubscriber } from './db.js';
 import { ensureAccountIndexes } from './account-db.js';
 import authRouter, { adminAuthOk } from './auth.js';
 import { verifyMail, mailConfigured, sendMail, sendBranded } from './mailer.js';
@@ -327,6 +327,35 @@ app.use('/api/auth', authRouter);
 app.get('/api/spots', (_req, res) => {
   const left = Number(process.env.SPOTS_LEFT ?? 25);
   res.json({ ok: true, left: Number.isFinite(left) ? left : 25 });
+});
+
+// Newsletter subscribe (footer). Stores the address and sends a warm welcome;
+// the owner is copied so the list can be worked manually too.
+app.post('/api/newsletter', rateLimit, async (req, res) => {
+  const b = req.body || {};
+  if (typeof b.website === 'string' && b.website.trim() !== '') return res.json({ ok: true, message: 'Thanks for subscribing.' }); // honeypot
+  const email = String(b.email || '').trim().toLowerCase().slice(0, 200);
+  if (!EMAIL_RE.test(email)) return res.status(400).json({ ok: false, error: 'That email address does not look valid.' });
+  try {
+    const isNew = await addSubscriber(email);
+    if (isNew) {
+      sendBranded({
+        to: email,
+        subject: 'You\'re on the list — Next Imaginations',
+        heading: 'Welcome aboard',
+        lines: [
+          'Thanks for subscribing to the Next Imaginations note. Once a month we send one practical security or tech tip and one short case study — no spam, and you can unsubscribe any time by replying "stop".',
+          'If you have something you\'re trying to build or fix right now, just reply to this email — a principal reads every one.',
+        ],
+        cta: { label: 'See our services', url: `${SITE_URL}/services` },
+      }).catch((e) => console.error('[mail] newsletter welcome failed:', e.message));
+      sendMail({ to: OWNER_EMAIL, subject: `New subscriber — ${email}`, text: `${email} subscribed to the newsletter.` }).catch(() => {});
+    }
+    res.json({ ok: true, message: isNew ? 'You\'re subscribed — check your inbox for a hello.' : 'You\'re already on the list — thanks!' });
+  } catch (err) {
+    console.error('newsletter subscribe failed:', err.message);
+    res.status(500).json({ ok: false, error: 'Could not subscribe right now. Please try again shortly.' });
+  }
 });
 
 app.post('/api/pv', async (req, res) => {

@@ -41,6 +41,7 @@ export async function connectDb() {
     ticketReplies: db.collection('ticket_replies'),
     credits: db.collection('credits'),
     authFails: db.collection('auth_fails'),
+    subscribers: db.collection('subscribers'),
   });
 
   await enquiries.createIndexes([
@@ -50,6 +51,7 @@ export async function connectDb() {
   ]);
 
   await pageviews.createIndex({ day: 1, path: 1 }, { unique: true, name: 'idx_day_path' });
+  await db.collection('subscribers').createIndex({ email: 1 }, { unique: true, name: 'uniq_sub_email' });
 
   // Round-trip ping so a bad URI/credentials fail at boot, not first request.
   await db.command({ ping: 1 });
@@ -99,6 +101,16 @@ export async function recordPageview(path) {
     { $inc: { n: 1 }, $setOnInsert: { first_seen: new Date() } },
     { upsert: true }
   );
+}
+
+// Upsert a newsletter subscriber. Returns true if newly added, false if already on the list.
+export async function addSubscriber(email) {
+  const r = await collections.subscribers.updateOne(
+    { email: String(email).toLowerCase() },
+    { $setOnInsert: { email: String(email).toLowerCase(), created_at: new Date() } },
+    { upsert: true }
+  );
+  return Boolean(r.upsertedId);
 }
 
 export async function closeDb() {
