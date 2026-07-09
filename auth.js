@@ -436,10 +436,61 @@ router.post('/me/tickets/:id/reply', requireAuth, async (req, res) => {
 });
 
 /* ── admin: orders, payments, tickets, credits (Bearer ADMIN_TOKEN) ── */
-function requireAdmin(req, res, next) {
-  if (!adminAuthOk(req)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
-  next();
+// Admin auth accepts EITHER a Bearer ADMIN_TOKEN (curl/API) OR a signed
+// httpOnly admin-session cookie set by the dashboard login below.
+const ADMIN_COOKIE = 'ni_admin';
+function readAdminCookie(req) {
+  const raw = req.headers.cookie || '';
+  for (const part of raw.split(';')) {
+    const i = part.indexOf('=');
+    if (i > -1 && part.slice(0, i).trim() === ADMIN_COOKIE) return part.slice(i + 1).trim();
+  }
+  return null;
 }
+async function requireAdmin(req, res, next) {
+  try {
+    if (adminAuthOk(req)) return next();
+    const t = readAdminCookie(req);
+    if (t && await adb.adminSessionValid(sha(t))) return next();
+    return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  } catch (e) { return res.status(500).json({ ok: false, error: 'Auth check failed.' }); }
+}
+
+// Dashboard login: exchange the admin password (ADMIN_TOKEN) for an httpOnly
+// admin session cookie, so the token is never stored in the browser.
+router.post('/admin/login', async (req, res) => {
+  const pw = String(req.body?.password || '');
+  const token = process.env.ADMIN_TOKEN || '';
+  if (!token || pw.length !== token.length || !safeEq(pw, token)) {
+    return res.status(401).json({ ok: false, error: 'Incorrect admin password.' });
+  }
+  const t = randomBytes(32).toString('base64url');
+  await adb.createAdminSession(sha(t), req.ip || null, clean(req.get('user-agent'), 300));
+  res.append('Set-Cookie', `${ADMIN_COOKIE}=${t}; HttpOnly; Path=/; Max-Age=${7 * 86400}` + cookieTail());
+  res.json({ ok: true });
+});
+router.post('/admin/logout', async (req, res) => {
+  const t = readAdminCookie(req);
+  if (t) await adb.revokeAdminSession(sha(t));
+  res.append('Set-Cookie', `${ADMIN_COOKIE}=; HttpOnly; Path=/; Max-Age=0` + cookieTail());
+  res.json({ ok: true });
+});
+
+// Read-all views for the dashboard.
+router.get('/admin/me', requireAdmin, (_req, res) => res.json({ ok: true, admin: true }));
+router.get('/admin/stats', requireAdmin, async (_req, res) => res.json({ ok: true, stats: await adb.adminStats() }));
+router.get('/admin/leads', requireAdmin, async (_req, res) => res.json({ ok: true, leads: await adb.adminAllEnquiries() }));
+router.patch('/admin/leads/:id', requireAdmin, async (req, res) => {
+  const status = clean(req.body?.status, 40);
+  const allowed = ['new', 'contacted', 'quoted', 'won', 'lost', 'closed'];
+  if (!allowed.includes(status)) return res.status(400).json({ ok: false, error: `status must be one of: ${allowed.join(', ')}` });
+  const ok = await adb.setEnquiryStatus(req.params.id, status);
+  res.json({ ok });
+});
+router.get('/admin/orders/all', requireAdmin, async (_req, res) => res.json({ ok: true, orders: await adb.adminAllOrders() }));
+router.get('/admin/payments/all', requireAdmin, async (_req, res) => res.json({ ok: true, payments: await adb.adminAllPayments() }));
+router.get('/admin/tickets/all', requireAdmin, async (_req, res) => res.json({ ok: true, tickets: await adb.adminAllTickets() }));
+router.get('/admin/clients', requireAdmin, async (_req, res) => res.json({ ok: true, clients: await adb.adminAllClients() }));
 router.post('/admin/orders', requireAdmin, async (req, res) => {
   const b = req.body || {};
   const email = clean(b.email, 200).toLowerCase();

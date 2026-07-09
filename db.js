@@ -42,6 +42,7 @@ export async function connectDb() {
     credits: db.collection('credits'),
     authFails: db.collection('auth_fails'),
     subscribers: db.collection('subscribers'),
+    adminSessions: db.collection('admin_sessions'),
   });
 
   await enquiries.createIndexes([
@@ -52,6 +53,8 @@ export async function connectDb() {
 
   await pageviews.createIndex({ day: 1, path: 1 }, { unique: true, name: 'idx_day_path' });
   await db.collection('subscribers').createIndex({ email: 1 }, { unique: true, name: 'uniq_sub_email' });
+  await db.collection('admin_sessions').createIndex({ token_hash: 1 }, { unique: true, name: 'uniq_admin_tok' });
+  await db.collection('admin_sessions').createIndex({ created_dt: 1 }, { expireAfterSeconds: 7 * 86400, name: 'ttl_admin_sess' });
 
   // Round-trip ping so a bad URI/credentials fail at boot, not first request.
   await db.command({ ping: 1 });

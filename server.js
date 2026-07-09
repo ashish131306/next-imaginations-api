@@ -340,7 +340,7 @@ app.use('/api/auth', (req, res, next) => {
 
 // Tighter limiter on credential endpoints, general limiter elsewhere.
 app.use('/api/auth', (req, res, next) => {
-  if (/^\/(register|login(\/mfa)?|otp\/(request|verify)|verify-email(\/resend)?)$/.test(req.path)) {
+  if (/^\/(register|login(\/mfa)?|otp\/(request|verify)|verify-email(\/resend)?|admin\/login)$/.test(req.path)) {
     return authLimiter(req, res, next);
   }
   return rateLimit(req, res, next);

@@ -269,3 +269,60 @@ export async function creditsByUser(userId) {
 export async function addCredit(userId, amount, reason) {
   await c.credits.insertOne({ user_id: String(userId), amount_inr: amount, reason, created_at: nowStr() });
 }
+
+/* ── admin: sessions + read-all views for the owner dashboard ───── */
+export async function createAdminSession(tokenHash, ip, ua) {
+  await c.adminSessions.insertOne({
+    token_hash: tokenHash, created_at: nowStr(), created_dt: new Date(),
+    expires_at: nowStr(7 * 86400 * 1000), ip: ip || null, user_agent: ua || null,
+  });
+}
+export async function adminSessionValid(tokenHash) {
+  return Boolean(await c.adminSessions.findOne({ token_hash: tokenHash, expires_at: { $gt: nowStr() } }));
+}
+export async function revokeAdminSession(tokenHash) {
+  await c.adminSessions.deleteOne({ token_hash: tokenHash });
+}
+
+export async function adminAllEnquiries(limit = 500) {
+  return (await c.enquiries.find({}).sort({ created_at: -1, _id: -1 }).limit(limit).toArray())
+    .map((e) => ({ ...pub(e), created_at: fmtDate(e.created_at) }));
+}
+export async function setEnquiryStatus(id, status) {
+  const _id = oid(id); if (!_id) return false;
+  const r = await c.enquiries.updateOne({ _id }, { $set: { status: String(status).slice(0, 40) } });
+  return r.matchedCount === 1;
+}
+export async function adminAllOrders() {
+  return (await c.orders.find({}).sort({ _id: -1 }).limit(1000).toArray()).map(pub);
+}
+export async function adminAllPayments() {
+  return (await c.payments.find({}).sort({ _id: -1 }).limit(1000).toArray()).map(pub);
+}
+export async function adminAllTickets() {
+  const tix = (await c.tickets.find({}).sort({ _id: -1 }).limit(500).toArray()).map(pub);
+  for (const t of tix) {
+    t.replies = await c.ticketReplies.find({ ticket_id: String(t._id || t.id) }).sort({ _id: 1 }).project({ _id: 0 }).toArray();
+    const u = await c.users.findOne({ _id: oid(t.user_id) }, { projection: { name: 1, email: 1 } });
+    t.client = u ? { name: u.name, email: u.email } : null;
+  }
+  return tix;
+}
+export async function adminAllClients() {
+  return (await c.users.find({}).sort({ _id: -1 }).limit(1000)
+    .project({ password_hash: 0 }).toArray())
+    .map((u) => ({ id: String(u._id), name: u.name, email: u.email, phone: u.phone || '', company: u.company || '',
+      emailVerified: Boolean(u.email_verified_at), created_at: u.created_at }));
+}
+export async function adminStats() {
+  const [leads, clients, orders, tickets] = await Promise.all([
+    c.enquiries.countDocuments(), c.users.countDocuments(), c.orders.countDocuments(),
+    c.tickets.countDocuments({ status: { $ne: 'closed' } }),
+  ]);
+  const newLeads = await c.enquiries.countDocuments({ status: 'new' });
+  const paid = await c.payments.aggregate([
+    { $match: { status: 'received' } }, { $group: { _id: null, sum: { $sum: '$amount_inr' } } },
+  ]).toArray();
+  const subs = await c.subscribers.countDocuments();
+  return { leads, newLeads, clients, orders, openTickets: tickets, revenue: paid[0]?.sum || 0, subscribers: subs };
+}
