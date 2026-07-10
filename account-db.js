@@ -13,6 +13,7 @@
 
 import { ObjectId } from 'mongodb';
 import { collections } from './db.js';
+import { encrypt, decrypt } from './crypto-fields.js';
 
 const c = collections; // { users, otps, sessions, orders, payments, tickets, ticketReplies, credits, enquiries }
 
@@ -57,16 +58,22 @@ export async function clearAuthFails(key) {
 }
 
 /* ── users ─────────────────────────────────────────────────────── */
+function decUser(u) {
+  if (!u) return u;
+  if (u.phone) u.phone = decrypt(u.phone);
+  if (u.totp_secret) u.totp_secret = decrypt(u.totp_secret);
+  return u;
+}
 export async function userByEmail(email) {
-  return pub(await c.users.findOne({ email: String(email).toLowerCase() }));
+  return decUser(pub(await c.users.findOne({ email: String(email).toLowerCase() })));
 }
 export async function userById(id) {
   const _id = oid(id); if (!_id) return null;
-  return pub(await c.users.findOne({ _id }));
+  return decUser(pub(await c.users.findOne({ _id })));
 }
 export async function createUser(u) {
   const { insertedId } = await c.users.insertOne({
-    name: u.name, email: u.email, phone: u.phone, company: u.company,
+    name: u.name, email: u.email, phone: encrypt(u.phone), company: u.company,
     password_hash: u.password_hash,
     email_verified_at: null, mfa_enabled: 0,
     consent_version: u.consent_version, consent_at: nowStr(),
@@ -81,7 +88,7 @@ export async function verifyEmail(id) {
 }
 export async function updateProfile(p) {
   await c.users.updateOne({ _id: oid(p.id) }, {
-    $set: { name: p.name, phone: p.phone, company: p.company, marketing_optin: p.marketing_optin ? 1 : 0, updated_at: nowStr() },
+    $set: { name: p.name, phone: encrypt(p.phone), company: p.company, marketing_optin: p.marketing_optin ? 1 : 0, updated_at: nowStr() },
   });
 }
 export async function setPassword(hash, id) {
@@ -91,7 +98,7 @@ export async function setMfa(on, id) {
   await c.users.updateOne({ _id: oid(id) }, { $set: { mfa_enabled: on ? 1 : 0, updated_at: nowStr() } });
 }
 export async function setTotpSecret(id, secret) {
-  await c.users.updateOne({ _id: oid(id) }, { $set: { totp_secret: secret, totp_enabled: 0, updated_at: nowStr() } });
+  await c.users.updateOne({ _id: oid(id) }, { $set: { totp_secret: encrypt(secret), totp_enabled: 0, updated_at: nowStr() } });
 }
 export async function enableTotp(id) {
   await c.users.updateOne({ _id: oid(id) }, { $set: { totp_enabled: 1, updated_at: nowStr() } });
@@ -182,7 +189,7 @@ export async function paymentsByUser(userId, email) {
 export async function enquiriesByEmail(email) {
   return (await c.enquiries.find({ email: ciEmail(email) }).sort({ _id: -1 }).limit(100)
     .project({ interest: 1, message: 1, source: 1, status: 1, created_at: 1 }).toArray())
-    .map((e) => ({ ...pub(e), created_at: fmtDate(e.created_at) }));
+    .map((e) => ({ ...pub(e), message: decrypt(e.message), created_at: fmtDate(e.created_at) }));
 }
 // enquiries.created_at is a BSON Date (written by the enquiry API) — render it
 // in the same string format the dashboard expects.
@@ -295,7 +302,7 @@ export async function revokeAdminSession(tokenHash) {
 
 export async function adminAllEnquiries(limit = 500) {
   return (await c.enquiries.find({}).sort({ created_at: -1, _id: -1 }).limit(limit).toArray())
-    .map((e) => ({ ...pub(e), created_at: fmtDate(e.created_at) }));
+    .map((e) => ({ ...pub(e), message: decrypt(e.message), created_at: fmtDate(e.created_at) }));
 }
 export async function setEnquiryStatus(id, status) {
   const _id = oid(id); if (!_id) return false;
@@ -320,7 +327,7 @@ export async function adminAllTickets() {
 export async function adminAllClients() {
   return (await c.users.find({}).sort({ _id: -1 }).limit(1000)
     .project({ password_hash: 0 }).toArray())
-    .map((u) => ({ id: String(u._id), name: u.name, email: u.email, phone: u.phone || '', company: u.company || '',
+    .map((u) => ({ id: String(u._id), name: u.name, email: u.email, phone: decrypt(u.phone) || '', company: u.company || '',
       emailVerified: Boolean(u.email_verified_at), created_at: u.created_at }));
 }
 export async function adminStats() {

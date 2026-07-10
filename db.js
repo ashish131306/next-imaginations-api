@@ -7,6 +7,7 @@
 // Connection string comes from MONGODB_URI (a MongoDB Atlas SRV URI in
 // production, e.g. mongodb+srv://user:pass@cluster0.xxxxx.mongodb.net).
 
+import { encrypt, decrypt } from './crypto-fields.js';
 import { MongoClient, ObjectId } from 'mongodb';
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
@@ -67,7 +68,7 @@ export async function createEnquiry(data) {
     email: data.email,
     company: data.company || null,
     interest: data.interest || null,
-    message: data.message,
+    message: encrypt(data.message),
     source: data.source || 'contact',
     services: Array.isArray(data.services) ? data.services.slice(0, 12) : null,
     estimate: data.estimate && typeof data.estimate === 'object' ? data.estimate : null,
@@ -81,7 +82,8 @@ export async function createEnquiry(data) {
 }
 
 export async function listEnquiries(limit = 500) {
-  return enquiries.find({}).sort({ created_at: -1 }).limit(limit).toArray();
+  const rows = await enquiries.find({}).sort({ created_at: -1 }).limit(limit).toArray();
+  return rows.map((e) => ({ ...e, message: decrypt(e.message) }));
 }
 
 export async function countEnquiries() {
