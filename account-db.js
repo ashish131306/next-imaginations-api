@@ -356,6 +356,10 @@ export async function createPendingPayment(p) {
   });
   return String(insertedId);
 }
+export async function setPaymentRzpOrder(id, rzpOrderId) {
+  const _id = oid(id); if (!_id) return;
+  await c.payments.updateOne({ _id }, { $set: { rzp_order_id: rzpOrderId } });
+}
 export async function markPaymentPaidByRzpOrder(rzpOrderId, reference) {
   const doc = await c.payments.findOne({ rzp_order_id: rzpOrderId });
   if (!doc) return { found: false };

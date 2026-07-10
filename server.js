@@ -43,7 +43,7 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: '64kb' }));
+app.use(express.json({ limit: '64kb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
 /* ------------------------------------------------ Email automation ----- */
 // Where new-lead alerts go, and a nicely formatted brand contact block.
@@ -503,6 +503,36 @@ app.post('/api/pay/verify', rateLimit, async (req, res) => {
     sendMail({ to: OWNER_EMAIL, subject: `PAID ${isConsult ? 'consultation' : 'payment'} — ${name} (₹${p.amount_inr})`, text: `${name} <${p.email}> paid ₹${p.amount_inr}${disc} (${p.kind}, Razorpay ${payment_id}).${p.note ? '\nNote: ' + p.note : ''}` }).catch(() => {});
   } catch (e) { console.error('pay record failed:', e.message); }
   res.json({ ok: true });
+});
+
+// Razorpay webhook — server-to-server confirmation, independent of the
+// customer's browser. Guarantees a captured payment is recorded even if the
+// browser closes before the success callback. Signature-verified; dormant
+// until RAZORPAY_WEBHOOK_SECRET is set (see the Razorpay dashboard).
+app.post('/api/razorpay/webhook', async (req, res) => {
+  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+  if (!secret) return res.status(503).json({ ok: false, error: 'Webhook not configured.' });
+  const sig = String(req.headers['x-razorpay-signature'] || '');
+  const raw = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
+  const expected = createHmac('sha256', secret).update(raw).digest('hex');
+  const x = Buffer.from(expected), y = Buffer.from(sig);
+  if (x.length !== y.length || !timingSafeEqual(x, y)) return res.status(400).json({ ok: false, error: 'Invalid signature.' });
+  try {
+    const evt = req.body || {};
+    const payEnt = evt?.payload?.payment?.entity;
+    const ordEnt = evt?.payload?.order?.entity;
+    const orderId = payEnt?.order_id || ordEnt?.id;
+    const paymentId = payEnt?.id || 'webhook';
+    if ((evt.event === 'payment.captured' || evt.event === 'order.paid') && orderId) {
+      const settled = await markPaymentPaidByRzpOrder(orderId, 'RZP:' + paymentId);
+      if (settled.found && !settled.alreadyPaid) {
+        console.log('[webhook] reconciled payment for order', orderId);
+        sendMail({ to: OWNER_EMAIL, subject: `Payment auto-reconciled — ₹${settled.payment.amount_inr}`,
+          text: `Razorpay's webhook confirmed a payment (${paymentId}) that the browser flow hadn't recorded. It's now marked received in your dashboard. Client: ${settled.payment.email || '—'}.` }).catch(() => {});
+      }
+    }
+  } catch (e) { console.error('[webhook] error:', e.message); }
+  res.json({ ok: true }); // always 2xx so Razorpay doesn't retry a handled event
 });
 
 app.post('/api/pv', async (req, res) => {

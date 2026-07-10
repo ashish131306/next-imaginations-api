@@ -735,6 +735,7 @@ router.post('/me/payments/:id/rzp-order', requireAuth, async (req, res) => {
   });
   const data = await r.json();
   if (!r.ok) return res.status(502).json({ ok: false, error: 'Payment gateway error.' });
+  await adb.setPaymentRzpOrder(p.id, data.id); // enables webhook reconciliation
   res.json({ ok: true, orderId: data.id, keyId: RZP_ID, amount: p.amount_inr * 100, name: req.user.name, email: req.user.email });
 });
 router.post('/me/payments/:id/rzp-verify', requireAuth, async (req, res) => {
