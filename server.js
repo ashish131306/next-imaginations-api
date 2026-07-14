@@ -248,6 +248,21 @@ function sanitizeObj(v, depth = 0) {
   return out;
 }
 
+function sanitizeMeta(m) {
+  if (!m || typeof m !== 'object') return {};
+  const s = (v, n) => (v == null ? null : (String(v).trim().slice(0, n) || null));
+  const out = {};
+  if (m.utm && typeof m.utm === 'object') {
+    const u = {};
+    ['source', 'medium', 'campaign', 'term', 'content'].forEach((k) => { const v = s(m.utm[k], 100); if (v) u[k] = v; });
+    if (Object.keys(u).length) out.utm = u;
+  }
+  out.referrer = s(m.referrer, 200);
+  out.landing = s(m.landing, 200);
+  out.channel = s(m.channel, 80);
+  return out;
+}
+
 app.post('/api/enquiries', rateLimit, async (req, res) => {
   const b = req.body || {};
 
@@ -260,6 +275,9 @@ app.post('/api/enquiries', rateLimit, async (req, res) => {
   const name = String(b.name || '').trim().slice(0, 120);
   const email = String(b.email || '').trim().slice(0, 200);
   const message = String(b.message || '').trim().slice(0, 5000);
+  const budget = b.budget ? String(b.budget).trim().slice(0, 60) : null;
+  const timeline = b.timeline ? String(b.timeline).trim().slice(0, 60) : null;
+  const meta = sanitizeMeta(b.meta);
 
   const errors = [];
   if (name.length < 2) errors.push('Please tell us your name.');
@@ -277,6 +295,12 @@ app.post('/api/enquiries', rateLimit, async (req, res) => {
       source: b.source ? String(b.source).trim().slice(0, 40) : 'contact',
       services: Array.isArray(b.services) ? sanitizeObj(b.services) : null,
       estimate: b.estimate && typeof b.estimate === 'object' ? sanitizeObj(b.estimate) : null,
+      budget,
+      timeline,
+      utm: meta.utm || null,
+      referrer: meta.referrer || null,
+      landing: meta.landing || null,
+      channel: meta.channel || null,
       ip: req.ip || null,
       user_agent: String(req.headers['user-agent'] || '').slice(0, 300) || null,
     });
